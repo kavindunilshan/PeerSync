@@ -1,10 +1,12 @@
 package com.example.peersync
 
 import android.content.IntentFilter
+import android.net.Uri
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,9 +29,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var receiver: WifiP2pReceiver
     private lateinit var intentFilter: IntentFilter
 
+    private val filePickerLauncher =
+    registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
+        viewModel.addFilesToSyncFolder(uris)
+    }
+
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        viewModel.setAppContext(this)
         viewModel.initializeWifiDirect(this)
+        viewModel.initializeSyncFolder(this)  // <-- add this line
 
         // Initialize WiFi Direct receiver
         intentFilter = IntentFilter().apply {
@@ -51,7 +61,9 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    WifiDirectScreen(viewModel)
+                    WifiDirectScreen(viewModel,onFilePick = {
+                        filePickerLauncher.launch(arrayOf("*/*"))
+                    })
                 }
             }
         }
@@ -70,7 +82,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun WifiDirectScreen(viewModel: WifiDirectViewModel) {
+fun WifiDirectScreen(viewModel: WifiDirectViewModel, onFilePick: () -> Unit) {
     val uiState by viewModel.uiState.collectAsState()
     
     val permissionsState = rememberMultiplePermissionsState(
@@ -155,6 +167,25 @@ fun WifiDirectScreen(viewModel: WifiDirectViewModel) {
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text("Synced Files", style = MaterialTheme.typography.titleMedium)
+
+        Button(onClick = { onFilePick() }) {
+            Text("Add Files")
+        }
+
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(uiState.syncedFiles) { file ->
+                Text(
+                    text = file.name,
+                    modifier = Modifier.padding(8.dp),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+
     }
 }
 
