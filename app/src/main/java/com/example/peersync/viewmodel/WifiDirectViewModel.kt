@@ -28,30 +28,48 @@ class WifiDirectViewModel : ViewModel() {
 
     private fun hasRequiredPermissions(): Boolean {
         context?.let { ctx ->
-            val hasLocationPermission = ContextCompat.checkSelfPermission(
-                ctx,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-
-            val hasNearbyDevicesPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(
+            // For Android 14 and above, we primarily need NEARBY_WIFI_DEVICES
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                return ContextCompat.checkSelfPermission(
                     ctx,
                     Manifest.permission.NEARBY_WIFI_DEVICES
                 ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                true
             }
+            // For Android 13
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val hasNearbyDevices = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.NEARBY_WIFI_DEVICES
+                ) == PackageManager.PERMISSION_GRANTED
 
-            val hasBackgroundLocationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                ContextCompat.checkSelfPermission(
+                val hasLocation = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                return hasNearbyDevices && hasLocation
+            }
+            // For Android 11-12
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val hasLocation = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                val hasBackgroundLocation = ContextCompat.checkSelfPermission(
                     ctx,
                     Manifest.permission.ACCESS_BACKGROUND_LOCATION
                 ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                true
-            }
 
-            return hasLocationPermission && hasNearbyDevicesPermission && hasBackgroundLocationPermission
+                return hasLocation && hasBackgroundLocation
+            }
+            // For Android 10 and below
+            else {
+                return ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+            }
         }
         return false
     }
@@ -77,7 +95,7 @@ class WifiDirectViewModel : ViewModel() {
                 isWifiEnabled = isWifiEnabled,
                 discoveryStatus = if (!isWifiEnabled) DiscoveryStatus.WIFI_DISABLED else DiscoveryStatus.IDLE
             ) }
-            
+
             if (isWifiEnabled && hasRequiredPermissions()) {
                 startDiscovery()
             }
@@ -133,6 +151,33 @@ class WifiDirectViewModel : ViewModel() {
             }
 
             _uiState.update { it.copy(isDiscovering = true) }
+
+            // For Android 14+, add a small delay before starting discovery
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                android.os.Handler(context?.mainLooper!!).postDelayed({
+                    initiateDiscovery()
+                }, 1000)
+            } else {
+                initiateDiscovery()
+            }
+        } catch (e: SecurityException) {
+            _uiState.update { it.copy(
+                discoveryStatus = DiscoveryStatus.PERMISSION_DENIED,
+                isDiscovering = false
+            ) }
+        }
+    }
+
+    private fun initiateDiscovery() {
+        if (!hasRequiredPermissions()) {
+            _uiState.update { it.copy(
+                discoveryStatus = DiscoveryStatus.PERMISSION_DENIED,
+                isDiscovering = false
+            ) }
+            return
+        }
+
+        try {
             wifiP2pManager?.discoverPeers(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     _uiState.update { it.copy(discoveryStatus = DiscoveryStatus.STARTED) }
@@ -142,23 +187,59 @@ class WifiDirectViewModel : ViewModel() {
                 override fun onFailure(reason: Int) {
                     val status = when (reason) {
                         WifiP2pManager.P2P_UNSUPPORTED -> DiscoveryStatus.UNSUPPORTED
-                        WifiP2pManager.BUSY -> DiscoveryStatus.BUSY
-                        WifiP2pManager.ERROR -> DiscoveryStatus.ERROR
+                        WifiP2pManager.BUSY -> {
+                            // For Android 14+, retry after a short delay if busy
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                                android.os.Handler(context?.mainLooper!!).postDelayed({
+                                    startDiscovery()
+                                }, 2000)
+                                DiscoveryStatus.STARTED
+                            } else {
+                                DiscoveryStatus.BUSY
+                            }
+                        }
+                        WifiP2pManager.ERROR -> {
+                            // For Android 14+, check if WiFi is actually enabled
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && wifiManager?.isWifiEnabled == true) {
+                                android.os.Handler(context?.mainLooper!!).postDelayed({
+                                    startDiscovery()
+                                }, 2000)
+                                DiscoveryStatus.STARTED
+                            } else {
+                                DiscoveryStatus.ERROR
+                            }
+                        }
                         else -> DiscoveryStatus.FAILED
                     }
-                    _uiState.update { 
+                    _uiState.update {
                         it.copy(
                             discoveryStatus = status,
-                            isDiscovering = false
+                            isDiscovering = status == DiscoveryStatus.STARTED
                         )
                     }
                 }
-            })
+            }) ?: run {
+                _uiState.update {
+                    it.copy(
+                        discoveryStatus = DiscoveryStatus.ERROR,
+                        isDiscovering = false
+                    )
+                }
+            }
         } catch (e: SecurityException) {
-            _uiState.update { it.copy(
-                discoveryStatus = DiscoveryStatus.PERMISSION_DENIED,
-                isDiscovering = false
-            ) }
+            _uiState.update {
+                it.copy(
+                    discoveryStatus = DiscoveryStatus.PERMISSION_DENIED,
+                    isDiscovering = false
+                )
+            }
+        } catch (e: IllegalArgumentException) {
+            _uiState.update {
+                it.copy(
+                    discoveryStatus = DiscoveryStatus.ERROR,
+                    isDiscovering = false
+                )
+            }
         }
     }
 
@@ -308,4 +389,4 @@ enum class DiscoveryStatus {
     CONNECTION_FAILED,
     WIFI_DISABLED,
     PERMISSION_DENIED
-} 
+}
