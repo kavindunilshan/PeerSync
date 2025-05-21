@@ -8,8 +8,11 @@ import android.net.Uri
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Bundle
-import android.provider.DocumentsContract
+import android.os.Handler
+import android.os.Looper
+import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,20 +20,25 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import com.example.peersync.data.SyncedFile
 import com.example.peersync.data.WifiPeerDevice
 import com.example.peersync.receiver.WifiP2pReceiver
 import com.example.peersync.ui.theme.PeerSyncTheme
 import com.example.peersync.viewmodel.DiscoveryStatus
 import com.example.peersync.viewmodel.WifiDirectViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
-import com.google.accompanist.permissions.MultiplePermissionsState
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : ComponentActivity() {
     private val viewModel: WifiDirectViewModel by viewModels()
@@ -50,6 +58,46 @@ class MainActivity : ComponentActivity() {
                 viewModel.setSelectedFolder(uri.toString())
             }
         }
+    }
+
+    private val filePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { uri ->
+                // Copy the file to a temporary location
+                val inputStream = contentResolver.openInputStream(uri)
+                val fileName = getFileName(uri) ?: "unknown_file"
+                val tempFile = File(cacheDir, fileName)
+                
+                inputStream?.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                
+                // Add the file to sync
+                viewModel.addFile(tempFile)
+                
+                // Clean up temp file after a delay
+                Handler(Looper.getMainLooper()).postDelayed({
+                    tempFile.delete()
+                }, 5000)
+            }
+        }
+    }
+
+    private fun getFileName(uri: Uri): String? {
+        var fileName: String? = null
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    fileName = cursor.getString(nameIndex)
+                }
+            }
+        }
+        return fileName
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,7 +126,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     WifiDirectScreen(
                         viewModel = viewModel,
-                        onSelectFolder = { openFolderPicker() }
+                        onPickFile = { filePickerLauncher.launch(Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }) }
                     )
                 }
             }
@@ -109,10 +157,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun WifiDirectScreen(
     viewModel: WifiDirectViewModel,
-    onSelectFolder: () -> Unit
+    onPickFile: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val localFiles by viewModel.localFiles.collectAsState()
+    val syncedFiles by viewModel.syncedFiles.collectAsState()
     val context = LocalContext.current
+    var showCreateFileDialog by remember { mutableStateOf(false) }
     
     // Basic permissions needed for WiFi Direct
     val basicPermissionsState = rememberMultiplePermissionsState(
@@ -224,21 +275,96 @@ fun WifiDirectScreen(
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
+            // Add file button
             Button(
-                onClick = onSelectFolder,
+                onClick = {
+                    try {
+                        onPickFile()
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "Error launching file picker", e)
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp)
             ) {
-                Text("Select Folder to Sync")
+                Text("Add File")
             }
 
-            uiState.selectedFolderPath?.let { path ->
-                Text(
-                    text = "Selected folder: ${Uri.parse(path).lastPathSegment}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(bottom = 16.dp)
-                )
+            // Local files section
+            if (localFiles.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    Text(
+                        text = "Local Files",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        items(localFiles) { file ->
+                            FileItem(file = file)
+                        }
+                    }
+
+                    // Sync status
+                    uiState.syncStatus?.let { status ->
+                        Text(
+                            text = status,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = when {
+                                status.contains("failed") -> MaterialTheme.colorScheme.error
+                                status.contains("completed with errors") -> MaterialTheme.colorScheme.error
+                                status.contains("completed successfully") -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onBackground
+                            },
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                    }
+
+                    // Sync button
+                    Button(
+                        onClick = { viewModel.syncFiles() },
+                        enabled = uiState.syncStatus == null || !uiState.syncStatus!!.contains("Syncing"),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                    ) {
+                        Text(if (uiState.syncStatus?.contains("Syncing") == true) "Syncing..." else "Sync Files")
+                    }
+                }
+            }
+
+            // Synced files section
+            if (syncedFiles.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    Text(
+                        text = "Synced Files",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        items(syncedFiles) { file ->
+                            FileItem(file = file)
+                        }
+                    }
+                }
             }
 
             Button(
@@ -248,7 +374,7 @@ fun WifiDirectScreen(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 16.dp)
+                    .padding(vertical = 16.dp)
             ) {
                 Text("Disconnect")
             }
@@ -352,7 +478,7 @@ fun PeerDeviceItem(
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.bodyMedium
                 )
-            } else {
+        } else {
                 Button(
                     onClick = { onConnect(peer) }
                 ) {
@@ -418,6 +544,109 @@ fun PermissionStatusCard(
             }
         }
     }
+}
+
+@Composable
+fun FileItem(
+    file: SyncedFile
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = file.name,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = formatFileSize(file.size),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CreateTextFileDialog(
+    onDismiss: () -> Unit,
+    onCreateFile: (String, String) -> Unit
+) {
+    var fileName by remember { mutableStateOf(TextFieldValue()) }
+    var fileContent by remember { mutableStateOf(TextFieldValue()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Create Text File")
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = fileName,
+                    onValueChange = { fileName = it },
+                    label = { Text("File Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                )
+
+                OutlinedTextField(
+                    value = fileContent,
+                    onValueChange = { fileContent = it },
+                    label = { Text("Content") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp),
+                    maxLines = 5
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val name = fileName.text.trim()
+                    if (name.isNotEmpty()) {
+                        onCreateFile(
+                            if (!name.endsWith(".txt")) "$name.txt" else name,
+                            fileContent.text
+                        )
+                    }
+                },
+                enabled = fileName.text.trim().isNotEmpty()
+            ) {
+                Text("Create")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+private fun formatFileSize(size: Long): String {
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var value = size.toDouble()
+    var unit = 0
+    while (value > 1024 && unit < units.size - 1) {
+        value /= 1024
+        unit++
+    }
+    return "%.1f %s".format(value, units[unit])
 }
 
 

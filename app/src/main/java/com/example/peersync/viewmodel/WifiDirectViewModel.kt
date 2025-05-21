@@ -9,73 +9,40 @@ import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.example.peersync.data.WifiPeerDevice
+import com.example.peersync.data.SyncedFile
+import com.example.peersync.sync.SyncManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.io.File
 
 class WifiDirectViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(WifiDirectUiState())
     val uiState: StateFlow<WifiDirectUiState> = _uiState.asStateFlow()
 
+    private val _localFiles = MutableStateFlow<List<SyncedFile>>(emptyList())
+    val localFiles: StateFlow<List<SyncedFile>> = _localFiles.asStateFlow()
+
     private var wifiP2pManager: WifiP2pManager? = null
     private var channel: WifiP2pManager.Channel? = null
     private var wifiManager: WifiManager? = null
     private var context: Context? = null
+    private var syncManager: SyncManager? = null
+    private var localFolder: File? = null
 
-    private fun hasRequiredPermissions(): Boolean {
-        context?.let { ctx ->
-            // For Android 14 and above, we primarily need NEARBY_WIFI_DEVICES
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                return ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.NEARBY_WIFI_DEVICES
-                ) == PackageManager.PERMISSION_GRANTED
-            }
-            // For Android 13
-            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val hasNearbyDevices = ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.NEARBY_WIFI_DEVICES
-                ) == PackageManager.PERMISSION_GRANTED
-
-                val hasLocation = ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-
-                return hasNearbyDevices && hasLocation
-            }
-            // For Android 11-12
-            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val hasLocation = ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-
-                val hasBackgroundLocation = ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.ACCESS_BACKGROUND_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-
-                return hasLocation && hasBackgroundLocation
-            }
-            // For Android 10 and below
-            else {
-                return ContextCompat.checkSelfPermission(
-                    ctx,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-            }
-        }
-        return false
-    }
+    val syncedFiles: StateFlow<List<SyncedFile>> get() = syncManager?.syncedFiles ?: MutableStateFlow(emptyList())
 
     fun initializeWifiDirect(context: Context) {
         this.context = context
+        localFolder = File(context.filesDir, "local_files").apply { mkdirs() }
+        syncManager = SyncManager(context)
         try {
             wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
             wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -151,8 +118,7 @@ class WifiDirectViewModel : ViewModel() {
             }
 
             _uiState.update { it.copy(isDiscovering = true) }
-
-            // For Android 14+, add a small delay before starting discovery
+            
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 android.os.Handler(context?.mainLooper!!).postDelayed({
                     initiateDiscovery()
@@ -320,6 +286,12 @@ class WifiDirectViewModel : ViewModel() {
             discoveryStatus = if (info.groupFormed) DiscoveryStatus.CONNECTED else DiscoveryStatus.IDLE,
             isDiscovering = false
         ) }
+
+        if (info.groupFormed) {
+            syncManager?.startSyncServer()
+        } else {
+            syncManager?.stopSyncServer()
+        }
     }
 
     fun disconnectFromPeer() {
@@ -329,6 +301,9 @@ class WifiDirectViewModel : ViewModel() {
         }
 
         try {
+            // Stop sync server before disconnecting
+            syncManager?.stopSyncServer()
+            
             wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     _uiState.update { it.copy(
@@ -356,8 +331,121 @@ class WifiDirectViewModel : ViewModel() {
         _uiState.update { it.copy(selectedFolderPath = path) }
     }
 
+    fun addFile(sourceFile: File) {
+        viewModelScope.launch {
+            try {
+                // Copy file to local folder
+                val targetFile = File(localFolder, sourceFile.name)
+                sourceFile.copyTo(targetFile, overwrite = true)
+                updateLocalFilesList()
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error adding file", e)
+            }
+        }
+    }
+
+    private fun updateLocalFilesList() {
+        localFolder?.let { folder ->
+            val files = folder.listFiles()?.map { file ->
+                SyncedFile(
+                    name = file.name,
+                    size = file.length(),
+                    lastModified = file.lastModified(),
+                    path = file.absolutePath
+                )
+            } ?: emptyList()
+            _localFiles.value = files
+        }
+    }
+
+    fun syncFiles() {
+        viewModelScope.launch {
+            try {
+                val hostAddress = uiState.value.groupOwnerAddress ?: return@launch
+                
+                // Update transfer status
+                _uiState.update { it.copy(syncStatus = "Syncing files...") }
+                
+                var hasErrors = false
+                
+                // Sync all local files to peer
+                localFolder?.listFiles()?.forEach { file ->
+                    try {
+                        syncManager?.syncFile(file, hostAddress)
+                    } catch (e: Exception) {
+                        Log.e("WifiDirectViewModel", "Error syncing file ${file.name}", e)
+                        hasErrors = true
+                    }
+                }
+                
+                // Update UI based on sync result
+                _uiState.update { it.copy(
+                    syncStatus = if (hasErrors) "Sync completed with errors" else "Sync completed successfully"
+                ) }
+                
+                // Clear status after delay
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(3000)
+                    _uiState.update { it.copy(syncStatus = null) }
+                }
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error during sync", e)
+                _uiState.update { it.copy(syncStatus = "Sync failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun hasRequiredPermissions(): Boolean {
+        context?.let { ctx ->
+            // For Android 14 and above, we primarily need NEARBY_WIFI_DEVICES
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                return ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.NEARBY_WIFI_DEVICES
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+            // For Android 13
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val hasNearbyDevices = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.NEARBY_WIFI_DEVICES
+                ) == PackageManager.PERMISSION_GRANTED
+
+                val hasLocation = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                return hasNearbyDevices && hasLocation
+            }
+            // For Android 11-12
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val hasLocation = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                val hasBackgroundLocation = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                return hasLocation && hasBackgroundLocation
+            }
+            // For Android 10 and below
+            else {
+                return ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        return false
+    }
+
     override fun onCleared() {
         super.onCleared()
+        syncManager?.stopSyncServer()
         context = null
     }
 }
@@ -373,7 +461,8 @@ data class WifiDirectUiState(
     val discoveryStatus: DiscoveryStatus = DiscoveryStatus.IDLE,
     val availablePeers: List<WifiPeerDevice> = emptyList(),
     val selectedDevice: WifiPeerDevice? = null,
-    val selectedFolderPath: String? = null
+    val selectedFolderPath: String? = null,
+    val syncStatus: String? = null
 )
 
 enum class DiscoveryStatus {
