@@ -3,6 +3,7 @@ package com.example.peersync.viewmodel
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
@@ -16,6 +17,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.peersync.data.WifiPeerDevice
 import com.example.peersync.data.SyncedFile
 import com.example.peersync.sync.SyncManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,9 +36,10 @@ class WifiDirectViewModel : ViewModel() {
     private var wifiP2pManager: WifiP2pManager? = null
     private var channel: WifiP2pManager.Channel? = null
     private var wifiManager: WifiManager? = null
-    private var context: Context? = null
+    var context: Context? = null
     private var syncManager: SyncManager? = null
     private var localFolder: File? = null
+    private var fileToSave: SyncedFile? = null
 
     val syncedFiles: StateFlow<List<SyncedFile>> get() = syncManager?.syncedFiles ?: MutableStateFlow(emptyList())
 
@@ -288,9 +292,11 @@ class WifiDirectViewModel : ViewModel() {
         ) }
 
         if (info.groupFormed) {
+            syncManager?.onConnectionEstablished()
             syncManager?.startSyncServer()
         } else {
             syncManager?.stopSyncServer()
+            syncManager?.onConnectionTerminated()
         }
     }
 
@@ -301,8 +307,9 @@ class WifiDirectViewModel : ViewModel() {
         }
 
         try {
-            // Stop sync server before disconnecting
+            // Stop sync server and cleanup sync folder before disconnecting
             syncManager?.stopSyncServer()
+            syncManager?.onConnectionTerminated()
             
             wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
@@ -391,6 +398,38 @@ class WifiDirectViewModel : ViewModel() {
             } catch (e: Exception) {
                 Log.e("WifiDirectViewModel", "Error during sync", e)
                 _uiState.update { it.copy(syncStatus = "Sync failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun prepareFileForSaving(file: SyncedFile) {
+        fileToSave = file
+    }
+
+    fun saveFileToUri(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val file = fileToSave
+                if (file == null || context == null) {
+                    _uiState.update { it.copy(syncStatus = "Error: Could not save file") }
+                    return@launch
+                }
+
+                context!!.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                    File(file.path).inputStream().use { inputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+
+                _uiState.update { it.copy(syncStatus = "File saved successfully") }
+                // Clear status after delay
+                delay(2000)
+                _uiState.update { it.copy(syncStatus = null) }
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error saving file", e)
+                _uiState.update { it.copy(syncStatus = "Error saving file: ${e.message}") }
+            } finally {
+                fileToSave = null
             }
         }
     }

@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -87,6 +88,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val createFileLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        uri?.let { viewModel.saveFileToUri(it) }
+    }
+
     private fun getFileName(uri: Uri): String? {
         var fileName: String? = null
         contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -126,8 +133,14 @@ class MainActivity : ComponentActivity() {
                 ) {
                     WifiDirectScreen(
                         viewModel = viewModel,
-                        onPickFile = { filePickerLauncher.launch(Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }) }
+                        onPickFile = {
+                            filePickerLauncher.launch(Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" })
+                        },
+                        onDownloadFile = { fileName ->
+                            createFileLauncher.launch(fileName)
+                        }
                     )
+
                 }
             }
         }
@@ -157,7 +170,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun WifiDirectScreen(
     viewModel: WifiDirectViewModel,
-    onPickFile: () -> Unit
+    onPickFile: () -> Unit,
+    onDownloadFile: (String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val localFiles by viewModel.localFiles.collectAsState()
@@ -291,6 +305,32 @@ fun WifiDirectScreen(
                 Text("Add File")
             }
 
+            // Sync status
+            uiState.syncStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = when {
+                        status.contains("failed") -> MaterialTheme.colorScheme.error
+                        status.contains("completed with errors") -> MaterialTheme.colorScheme.error
+                        status.contains("completed successfully") -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onBackground
+                    },
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+
+            // Sync button - moved outside the local files section
+            Button(
+                onClick = { viewModel.syncFiles() },
+                enabled = uiState.syncStatus == null || !uiState.syncStatus!!.contains("Syncing"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) {
+                Text(if (uiState.syncStatus?.contains("Syncing") == true) "Syncing..." else "Sync Files")
+            }
+
             // Local files section
             if (localFiles.isNotEmpty()) {
                 Column(
@@ -312,32 +352,6 @@ fun WifiDirectScreen(
                         items(localFiles) { file ->
                             FileItem(file = file)
                         }
-                    }
-
-                    // Sync status
-                    uiState.syncStatus?.let { status ->
-                        Text(
-                            text = status,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = when {
-                                status.contains("failed") -> MaterialTheme.colorScheme.error
-                                status.contains("completed with errors") -> MaterialTheme.colorScheme.error
-                                status.contains("completed successfully") -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.onBackground
-                            },
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                    }
-
-                    // Sync button
-                    Button(
-                        onClick = { viewModel.syncFiles() },
-                        enabled = uiState.syncStatus == null || !uiState.syncStatus!!.contains("Syncing"),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp)
-                    ) {
-                        Text(if (uiState.syncStatus?.contains("Syncing") == true) "Syncing..." else "Sync Files")
                     }
                 }
             }
@@ -361,7 +375,13 @@ fun WifiDirectScreen(
                             .weight(1f)
                     ) {
                         items(syncedFiles) { file ->
-                            FileItem(file = file)
+                            FileItem(
+                                file = file,
+                                onDownload = { syncedFile ->
+                                    viewModel.prepareFileForSaving(syncedFile)
+                                    onDownloadFile(syncedFile.name)
+                                }
+                            )
                         }
                     }
                 }
@@ -548,7 +568,8 @@ fun PermissionStatusCard(
 
 @Composable
 fun FileItem(
-    file: SyncedFile
+    file: SyncedFile,
+    onDownload: (SyncedFile) -> Unit = {}
 ) {
     Card(
         modifier = Modifier
@@ -572,6 +593,17 @@ fun FileItem(
                 Text(
                     text = formatFileSize(file.size),
                     style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            
+            // Download button
+            IconButton(
+                onClick = { onDownload(file) }
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = "Download file",
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
         }
