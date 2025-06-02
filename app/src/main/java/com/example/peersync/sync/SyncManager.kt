@@ -20,26 +20,46 @@ class SyncManager(private val context: Context) {
     private val fileTransferService = FileTransferService()
     private val syncScope = CoroutineScope(Dispatchers.IO)
     private var syncFolder: File? = null
+    private var isConnected = false
 
     companion object {
         private const val TAG = "SyncManager"
-        private const val SYNC_FOLDER_NAME = "synced_files"
+        private const val SYNC_FOLDER_NAME = "sync_folder"
     }
 
-    init {
-        initializeSyncFolder()
+    fun onConnectionEstablished() {
+        isConnected = true
+        createSyncFolder()
     }
 
-    private fun initializeSyncFolder() {
+    fun onConnectionTerminated() {
+        isConnected = false
+        removeSyncFolder()
+    }
+
+    private fun createSyncFolder() {
         syncFolder = File(context.filesDir, SYNC_FOLDER_NAME).apply {
-            if (!exists()) {
-                mkdirs()
+            if (exists()) {
+                deleteRecursively() // Clear any existing content
             }
+            mkdirs()
         }
         updateFilesList()
     }
 
+    private fun removeSyncFolder() {
+        syncFolder?.let { folder ->
+            if (folder.exists()) {
+                folder.deleteRecursively()
+            }
+        }
+        syncFolder = null
+        _syncedFiles.value = emptyList()
+    }
+
     fun startSyncServer() {
+        if (!isConnected) return
+
         fileTransferService.startServer { operation ->
             when (operation) {
                 is FileOperation.Add -> handleFileAdd(operation)
@@ -53,6 +73,8 @@ class SyncManager(private val context: Context) {
     }
 
     private fun handleFileAdd(operation: FileOperation.Add) {
+        if (!isConnected) return
+
         syncScope.launch {
             try {
                 val targetFile = File(syncFolder, operation.fileName)
@@ -66,6 +88,8 @@ class SyncManager(private val context: Context) {
     }
 
     private fun handleFileDelete(operation: FileOperation.Delete) {
+        if (!isConnected) return
+
         syncScope.launch {
             try {
                 val file = File(syncFolder, operation.fileName)
@@ -80,28 +104,21 @@ class SyncManager(private val context: Context) {
     }
 
     suspend fun syncFile(sourceFile: File, hostAddress: String) {
+        if (!isConnected) return
+
         try {
-            // Copy file to sync folder
             val targetFile = File(syncFolder, sourceFile.name)
-            
-            // Check if file exists and compare timestamps
-            if (targetFile.exists() && targetFile.lastModified() >= sourceFile.lastModified()) {
-                // Skip if local file is newer or same age
-                Log.d(TAG, "Skipping file ${sourceFile.name} as local copy is newer or same age")
-                return
-            }
-            
-            // Copy file to sync folder
+
+            // Always sync in connected mode
             sourceFile.copyTo(targetFile, overwrite = true)
-            
+
             // Retry logic for sending file
             var attempts = 0
             var success = false
             var lastError: Exception? = null
-            
+
             while (attempts < 3 && !success) {
                 try {
-                    // Send to peer
                     fileTransferService.sendFile(targetFile, hostAddress)
                     success = true
                 } catch (e: Exception) {
@@ -109,15 +126,15 @@ class SyncManager(private val context: Context) {
                     attempts++
                     if (attempts < 3) {
                         Log.w(TAG, "Retry $attempts: Error syncing file ${sourceFile.name}", e)
-                        kotlinx.coroutines.delay(1000L * attempts) // Exponential backoff
+                        kotlinx.coroutines.delay(1000L * attempts)
                     }
                 }
             }
-            
+
             if (!success) {
                 throw lastError ?: Exception("Failed to sync file after 3 attempts")
             }
-            
+
             updateFilesList()
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing file ${sourceFile.name}", e)
