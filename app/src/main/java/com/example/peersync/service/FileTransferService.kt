@@ -169,15 +169,17 @@ class FileTransferService {
         }
     }
 
-    suspend fun requestFilesFromPeer(hostAddress: String) = withContext(Dispatchers.IO) {
+        suspend fun requestFilesFromPeer(hostAddress: String) = withContext(Dispatchers.IO) {
         try {
+            Log.d(TAG, "Requesting files from peer: $hostAddress")
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(hostAddress, PORT), 5000)
                 val output = DataOutputStream(socket.getOutputStream())
 
                 output.writeUTF("REQUEST_FILES")
                 output.writeUTF("") // Empty filename for request
-
+                
+                Log.d(TAG, "Request files message sent successfully")
                 _transferStatus.value = TransferStatus.Success
             }
         } catch (e: IOException) {

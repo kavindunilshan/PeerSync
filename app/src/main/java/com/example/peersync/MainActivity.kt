@@ -350,7 +350,12 @@ fun WifiDirectScreen(
                             .weight(1f)
                     ) {
                         items(localFiles) { file ->
-                            FileItem(file = file)
+                            FileItem(
+                                file = file,
+                                onDelete = { localFile ->
+                                    viewModel.deleteLocalFile(localFile.name)
+                                }
+                            )
                         }
                     }
                 }
@@ -380,6 +385,9 @@ fun WifiDirectScreen(
                                 onDownload = { syncedFile ->
                                     viewModel.prepareFileForSaving(syncedFile)
                                     onDownloadFile(syncedFile.name)
+                                },
+                                onDelete = { syncedFile ->
+                                    viewModel.deleteFile(syncedFile)
                                 }
                             )
                         }
@@ -569,7 +577,8 @@ fun PermissionStatusCard(
 @Composable
 fun FileItem(
     file: SyncedFile,
-    onDownload: (SyncedFile) -> Unit = {}
+    onDownload: (SyncedFile) -> Unit = {},
+    onDelete: (SyncedFile) -> Unit = {}
 ) {
     Card(
         modifier = Modifier
@@ -596,15 +605,28 @@ fun FileItem(
                 )
             }
             
-            // Download button
-            IconButton(
-                onClick = { onDownload(file) }
-            ) {
-                Icon(
-                    imageVector = Icons.Default.GetApp,
-                    contentDescription = "Download file",
-                    tint = MaterialTheme.colorScheme.primary
-                )
+            Row {
+                // Download button
+                IconButton(
+                    onClick = { onDownload(file) }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.GetApp,
+                        contentDescription = "Download file",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                
+                // Delete button
+                IconButton(
+                    onClick = { onDelete(file) }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete file",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         }
     }

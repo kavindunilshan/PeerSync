@@ -321,10 +321,12 @@ class WifiDirectViewModel : ViewModel() {
         if (info.groupFormed) {
             val peerAddress = info.groupOwnerAddress?.hostAddress
             if (peerAddress != null) {
+                Log.d("WifiDirectViewModel", "Connection established with peer: $peerAddress")
                 syncManager?.onConnectionEstablished(peerAddress)
                 syncManager?.startSyncServer()
             }
         } else {
+            Log.d("WifiDirectViewModel", "Connection terminated")
             syncManager?.stopSyncServer()
             syncManager?.onConnectionTerminated()
         }
@@ -409,6 +411,9 @@ class WifiDirectViewModel : ViewModel() {
                     return@launch
                 }
                 
+                Log.d("WifiDirectViewModel", "Starting bidirectional sync with ${localFiles.size} files")
+                _uiState.update { it.copy(syncStatus = "Starting bidirectional sync...") }
+                
                 // Perform bidirectional sync
                 syncManager?.performBidirectionalSync(localFiles)
                 
@@ -447,6 +452,69 @@ class WifiDirectViewModel : ViewModel() {
                 _uiState.update { it.copy(syncStatus = "Error saving file: ${e.message}") }
             } finally {
                 fileToSave = null
+            }
+        }
+    }
+
+    fun deleteSyncedFile(fileName: String) {
+        viewModelScope.launch {
+            try {
+                if (uiState.value.isConnected) {
+                    // Send delete operation to peer
+                    syncManager?.syncDeleteOperation(fileName)
+                    Log.d("WifiDirectViewModel", "Delete operation sent for file: $fileName")
+                } else {
+                    Log.w("WifiDirectViewModel", "Not connected, cannot sync delete operation")
+                }
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error deleting file", e)
+                _uiState.update { it.copy(syncStatus = "Error deleting file: ${e.message}") }
+            }
+        }
+    }
+
+    fun deleteLocalFile(fileName: String) {
+        viewModelScope.launch {
+            try {
+                // Delete from local folder
+                val file = File(localFolder, fileName)
+                if (file.exists()) {
+                    file.delete()
+                    updateLocalFilesList()
+                    Log.d("WifiDirectViewModel", "Local file deleted: $fileName")
+                }
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error deleting local file", e)
+                _uiState.update { it.copy(syncStatus = "Error deleting local file: ${e.message}") }
+            }
+        }
+    }
+
+    fun deleteFile(file: SyncedFile) {
+        viewModelScope.launch {
+            try {
+                // Delete from sync folder
+                val syncFile = File(syncManager?.getSyncFolder(), file.name)
+                if (syncFile.exists()) {
+                    syncFile.delete()
+                    Log.d("WifiDirectViewModel", "Synced file deleted locally: ${file.name}")
+                }
+                
+                // Send delete operation to peer if connected
+                if (uiState.value.isConnected) {
+                    deleteSyncedFile(file.name)
+                    _uiState.update { it.copy(syncStatus = "File deleted and synced to peer") }
+                } else {
+                    _uiState.update { it.copy(syncStatus = "File deleted locally") }
+                }
+                
+                // Clear status after delay
+                kotlinx.coroutines.delay(2000)
+                _uiState.update { it.copy(syncStatus = null) }
+                
+            } catch (e: Exception) {
+                Log.e("WifiDirectViewModel", "Error deleting file", e)
+                _uiState.update { it.copy(syncStatus = "Error deleting file: ${e.message}") }
             }
         }
     }

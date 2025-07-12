@@ -65,7 +65,12 @@ dependencies {
     
     // Permission handling
     implementation("com.google.accompanist:accompanist-permissions:0.32.0")
-    
+
+    implementation("androidx.compose.material:material-icons-extended:1.6.1")
+
+
+
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
