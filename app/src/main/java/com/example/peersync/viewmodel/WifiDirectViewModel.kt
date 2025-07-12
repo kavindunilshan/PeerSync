@@ -49,7 +49,7 @@ class WifiDirectViewModel : ViewModel() {
         this.context = context
         localFolder = File(context.filesDir, "local_files").apply { mkdirs() }
         syncManager = SyncManager(context)
-        
+
         // Observe sync state changes
         viewModelScope.launch {
             syncManager?.syncState?.collect { state ->
@@ -59,6 +59,9 @@ class WifiDirectViewModel : ViewModel() {
                     }
                     is SyncState.SyncCompleted -> {
                         _uiState.update { it.copy(syncStatus = state.message) }
+                        // Refresh both local and synced files lists after sync completion
+                        updateLocalFilesList()
+                        refreshSyncedFilesList()
                         kotlinx.coroutines.delay(3000)
                         _uiState.update { it.copy(syncStatus = null) }
                     }
@@ -67,13 +70,17 @@ class WifiDirectViewModel : ViewModel() {
                         kotlinx.coroutines.delay(3000)
                         _uiState.update { it.copy(syncStatus = null) }
                     }
+                    is SyncState.FileDeleted -> {
+                        // Refresh lists when a file is deleted
+                        updateLocalFilesList()
+                    }
                     else -> {
                         // Keep current status for other states
                     }
                 }
             }
         }
-        
+
         try {
             wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
             wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -149,7 +156,7 @@ class WifiDirectViewModel : ViewModel() {
             }
 
             _uiState.update { it.copy(isDiscovering = true) }
-            
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 android.os.Handler(context?.mainLooper!!).postDelayed({
                     initiateDiscovery()
@@ -342,7 +349,7 @@ class WifiDirectViewModel : ViewModel() {
             // Stop sync server and cleanup sync folder before disconnecting
             syncManager?.stopSyncServer()
             syncManager?.onConnectionTerminated()
-            
+
             wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     _uiState.update { it.copy(
@@ -394,7 +401,14 @@ class WifiDirectViewModel : ViewModel() {
                 )
             } ?: emptyList()
             _localFiles.value = files
+            Log.d("WifiDirectViewModel", "Local files list updated: ${files.size} files")
         }
+    }
+
+    private fun refreshSyncedFilesList() {
+        // Refresh the synced files list by calling SyncManager's updateFilesList method
+        syncManager?.updateFilesList()
+        Log.d("WifiDirectViewModel", "Synced files list refresh requested")
     }
 
     fun syncFiles() {
@@ -404,19 +418,22 @@ class WifiDirectViewModel : ViewModel() {
                     _uiState.update { it.copy(syncStatus = "Not connected to peer") }
                     return@launch
                 }
-                
+
                 val localFiles = localFolder?.listFiles()?.toList() ?: emptyList()
                 if (localFiles.isEmpty()) {
                     _uiState.update { it.copy(syncStatus = "No files to sync") }
                     return@launch
                 }
-                
+
                 Log.d("WifiDirectViewModel", "Starting bidirectional sync with ${localFiles.size} files")
                 _uiState.update { it.copy(syncStatus = "Starting bidirectional sync...") }
-                
+
                 // Perform bidirectional sync
                 syncManager?.performBidirectionalSync(localFiles)
-                
+
+                // Refresh local files list after sync to reflect any changes
+                updateLocalFilesList()
+
             } catch (e: Exception) {
                 Log.e("WifiDirectViewModel", "Error during sync", e)
                 _uiState.update { it.copy(syncStatus = "Sync failed: ${e.message}") }
@@ -499,7 +516,17 @@ class WifiDirectViewModel : ViewModel() {
                     syncFile.delete()
                     Log.d("WifiDirectViewModel", "Synced file deleted locally: ${file.name}")
                 }
-                
+
+                // Also delete from local folder if it exists there
+                val localFile = File(localFolder, file.name)
+                if (localFile.exists()) {
+                    localFile.delete()
+                    Log.d("WifiDirectViewModel", "Local file also deleted: ${file.name}")
+                }
+
+                // Refresh local files list immediately
+                updateLocalFilesList()
+
                 // Send delete operation to peer if connected
                 if (uiState.value.isConnected) {
                     deleteSyncedFile(file.name)
@@ -507,11 +534,11 @@ class WifiDirectViewModel : ViewModel() {
                 } else {
                     _uiState.update { it.copy(syncStatus = "File deleted locally") }
                 }
-                
+
                 // Clear status after delay
                 kotlinx.coroutines.delay(2000)
                 _uiState.update { it.copy(syncStatus = null) }
-                
+
             } catch (e: Exception) {
                 Log.e("WifiDirectViewModel", "Error deleting file", e)
                 _uiState.update { it.copy(syncStatus = "Error deleting file: ${e.message}") }
