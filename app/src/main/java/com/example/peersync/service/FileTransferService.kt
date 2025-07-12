@@ -55,11 +55,11 @@ class FileTransferService {
         thread {
             try {
                 val input = DataInputStream(client.getInputStream())
-                
+
                 // Read operation type
                 val operationType = input.readUTF()
                 val fileName = input.readUTF()
-                
+
                 when (operationType) {
                     "ADD" -> {
                         val fileSize = input.readLong()
@@ -67,6 +67,9 @@ class FileTransferService {
                     }
                     "DELETE" -> {
                         onFileReceived(FileOperation.Delete(fileName))
+                    }
+                    "REQUEST_FILES" -> {
+                        onFileReceived(FileOperation.RequestFiles)
                     }
                 }
             } catch (e: IOException) {
@@ -97,14 +100,14 @@ class FileTransferService {
             while (receivedSize < fileSize) {
                 val bytesRead = input.read(buffer, 0, BUFFER_SIZE.coerceAtMost((fileSize - receivedSize).toInt()))
                 if (bytesRead == -1) break
-                
+
                 output.write(buffer, 0, bytesRead)
                 receivedSize += bytesRead
-                
+
                 val progress = (receivedSize.toFloat() / fileSize * 100).toInt()
                 _transferStatus.value = TransferStatus.Receiving(fileName, progress)
             }
-            
+
             output.close()
             onFileReceived(FileOperation.Add(fileName, tempFile))
             _transferStatus.value = TransferStatus.Success
@@ -124,22 +127,22 @@ class FileTransferService {
                 output.writeUTF("ADD")
                 output.writeUTF(file.name)
                 output.writeLong(file.length())
-                
+
                 val input = FileInputStream(file)
                 val buffer = ByteArray(BUFFER_SIZE)
                 var sentSize = 0L
-                
+
                 while (true) {
                     val bytesRead = input.read(buffer)
                     if (bytesRead == -1) break
-                    
+
                     output.write(buffer, 0, bytesRead)
                     sentSize += bytesRead
-                    
+
                     val progress = (sentSize.toFloat() / file.length() * 100).toInt()
                     _transferStatus.value = TransferStatus.Sending(file.name, progress)
                 }
-                
+
                 input.close()
                 _transferStatus.value = TransferStatus.Success
             }
@@ -157,12 +160,29 @@ class FileTransferService {
 
                 output.writeUTF("DELETE")
                 output.writeUTF(fileName)
-                
+
                 _transferStatus.value = TransferStatus.Success
             }
         } catch (e: IOException) {
             Log.e(TAG, "Error sending delete operation", e)
             _transferStatus.value = TransferStatus.Error("Failed to send delete operation: ${e.message}")
+        }
+    }
+
+    suspend fun requestFilesFromPeer(hostAddress: String) = withContext(Dispatchers.IO) {
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(hostAddress, PORT), 5000)
+                val output = DataOutputStream(socket.getOutputStream())
+
+                output.writeUTF("REQUEST_FILES")
+                output.writeUTF("") // Empty filename for request
+
+                _transferStatus.value = TransferStatus.Success
+            }
+        } catch (e: IOException) {
+            Log.e(TAG, "Error requesting files from peer", e)
+            _transferStatus.value = TransferStatus.Error("Failed to request files: ${e.message}")
         }
     }
 
@@ -188,4 +208,5 @@ sealed class TransferStatus {
 sealed class FileOperation {
     data class Add(val fileName: String, val file: File) : FileOperation()
     data class Delete(val fileName: String) : FileOperation()
+    object RequestFiles : FileOperation()
 } 
