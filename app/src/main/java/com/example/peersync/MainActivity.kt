@@ -283,7 +283,7 @@ fun WifiDirectScreen(
 
         if (uiState.isConnected) {
             Text(
-                text = "Connected to: ${uiState.selectedDevice?.deviceName}",
+                text = "Connected to: ${uiState.selectedDevice?.deviceName ?: "Chamara"}",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(bottom = 16.dp)
@@ -491,7 +491,7 @@ fun PeerDeviceItem(
         ) {
             Column {
                 Text(
-                    text = peer.deviceName.ifEmpty { "Unknown Device" },
+                    text = peer.deviceName.ifEmpty { "Chamara" },
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(

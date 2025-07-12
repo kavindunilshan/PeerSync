@@ -516,17 +516,18 @@ class WifiDirectViewModel : ViewModel() {
                     syncFile.delete()
                     Log.d("WifiDirectViewModel", "Synced file deleted locally: ${file.name}")
                 }
-
+                
                 // Also delete from local folder if it exists there
                 val localFile = File(localFolder, file.name)
                 if (localFile.exists()) {
                     localFile.delete()
                     Log.d("WifiDirectViewModel", "Local file also deleted: ${file.name}")
                 }
-
-                // Refresh local files list immediately
+                
+                // Refresh local and synced files lists immediately
                 updateLocalFilesList()
-
+                syncManager?.updateFilesList()
+                
                 // Send delete operation to peer if connected
                 if (uiState.value.isConnected) {
                     deleteSyncedFile(file.name)
@@ -534,11 +535,11 @@ class WifiDirectViewModel : ViewModel() {
                 } else {
                     _uiState.update { it.copy(syncStatus = "File deleted locally") }
                 }
-
+                
                 // Clear status after delay
                 kotlinx.coroutines.delay(2000)
                 _uiState.update { it.copy(syncStatus = null) }
-
+                
             } catch (e: Exception) {
                 Log.e("WifiDirectViewModel", "Error deleting file", e)
                 _uiState.update { it.copy(syncStatus = "Error deleting file: ${e.message}") }
