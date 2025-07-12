@@ -291,7 +291,7 @@ class SyncManager(private val context: Context) {
         }
     }
 
-    private fun updateFilesList() {
+    fun updateFilesList() {
         syncFolder?.let { folder ->
             val files = folder.listFiles()?.map { file ->
                 SyncedFile(
