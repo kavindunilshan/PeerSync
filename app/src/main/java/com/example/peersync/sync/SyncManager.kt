@@ -17,24 +17,32 @@ class SyncManager(private val context: Context) {
     private val _syncedFiles = MutableStateFlow<List<SyncedFile>>(emptyList())
     val syncedFiles: StateFlow<List<SyncedFile>> = _syncedFiles.asStateFlow()
 
+    private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
+    val syncState: StateFlow<SyncState> = _syncState.asStateFlow()
+
     private val fileTransferService = FileTransferService()
     private val syncScope = CoroutineScope(Dispatchers.IO)
     private var syncFolder: File? = null
     private var isConnected = false
+    private var peerAddress: String? = null
+    private var onRequestFilesCallback: (() -> Unit)? = null
 
     companion object {
         private const val TAG = "SyncManager"
         private const val SYNC_FOLDER_NAME = "sync_folder"
     }
 
-    fun onConnectionEstablished() {
+    fun onConnectionEstablished(peerAddress: String) {
+        this.peerAddress = peerAddress
         isConnected = true
         createSyncFolder()
     }
 
     fun onConnectionTerminated() {
         isConnected = false
+        peerAddress = null
         removeSyncFolder()
+        _syncState.value = SyncState.Idle
     }
 
     private fun createSyncFolder() {
@@ -64,6 +72,7 @@ class SyncManager(private val context: Context) {
             when (operation) {
                 is FileOperation.Add -> handleFileAdd(operation)
                 is FileOperation.Delete -> handleFileDelete(operation)
+                is FileOperation.RequestFiles -> handleRequestFiles()
             }
         }
     }
@@ -81,8 +90,10 @@ class SyncManager(private val context: Context) {
                 operation.file.copyTo(targetFile, overwrite = true)
                 operation.file.delete() // Delete temp file
                 updateFilesList()
+                _syncState.value = SyncState.FileReceived(operation.fileName)
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling file add", e)
+                _syncState.value = SyncState.Error("Failed to receive file: ${e.message}")
             }
         }
     }
@@ -96,11 +107,20 @@ class SyncManager(private val context: Context) {
                 if (file.exists()) {
                     file.delete()
                     updateFilesList()
+                    _syncState.value = SyncState.FileDeleted(operation.fileName)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling file delete", e)
+                _syncState.value = SyncState.Error("Failed to delete file: ${e.message}")
             }
         }
+    }
+
+    private fun handleRequestFiles() {
+        if (!isConnected) return
+        
+        _syncState.value = SyncState.Syncing("Peer requested files, sending local files...")
+        onRequestFilesCallback?.invoke()
     }
 
     suspend fun syncFile(sourceFile: File, hostAddress: String) {
@@ -121,6 +141,7 @@ class SyncManager(private val context: Context) {
                 try {
                     fileTransferService.sendFile(targetFile, hostAddress)
                     success = true
+                    _syncState.value = SyncState.FileSent(sourceFile.name)
                 } catch (e: Exception) {
                     lastError = e
                     attempts++
@@ -138,7 +159,68 @@ class SyncManager(private val context: Context) {
             updateFilesList()
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing file ${sourceFile.name}", e)
+            _syncState.value = SyncState.Error("Failed to sync file: ${e.message}")
             throw e
+        }
+    }
+
+    suspend fun performBidirectionalSync(localFiles: List<File>) {
+        if (!isConnected || peerAddress == null) {
+            _syncState.value = SyncState.Error("Not connected to peer")
+            return
+        }
+
+        try {
+            _syncState.value = SyncState.Syncing("Starting bidirectional sync...")
+            
+            // Set up callback for when peer requests files
+            onRequestFilesCallback = {
+                syncScope.launch {
+                    try {
+                        localFiles.forEach { file ->
+                            try {
+                                syncFile(file, peerAddress!!)
+                                _syncState.value = SyncState.Syncing("Sent ${file.name} to peer")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error sending file ${file.name} to peer", e)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in request files callback", e)
+                    }
+                }
+            }
+            
+            // Step 1: Send all local files to peer
+            localFiles.forEach { file ->
+                try {
+                    syncFile(file, peerAddress!!)
+                    _syncState.value = SyncState.Syncing("Sent ${file.name}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error sending file ${file.name}", e)
+                }
+            }
+
+            // Step 2: Request peer to send their files back
+            _syncState.value = SyncState.Syncing("Requesting files from peer...")
+            try {
+                fileTransferService.requestFilesFromPeer(peerAddress!!)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error requesting files from peer", e)
+            }
+            
+            // Add a small delay to ensure all files are processed
+            kotlinx.coroutines.delay(2000)
+            
+            _syncState.value = SyncState.SyncCompleted("Bidirectional sync completed")
+            
+            // Clear sync state after a delay
+            kotlinx.coroutines.delay(3000)
+            _syncState.value = SyncState.Idle
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during bidirectional sync", e)
+            _syncState.value = SyncState.Error("Bidirectional sync failed: ${e.message}")
         }
     }
 
@@ -157,4 +239,14 @@ class SyncManager(private val context: Context) {
     }
 
     fun getSyncFolder(): File? = syncFolder
+}
+
+sealed class SyncState {
+    object Idle : SyncState()
+    data class Syncing(val message: String) : SyncState()
+    data class FileSent(val fileName: String) : SyncState()
+    data class FileReceived(val fileName: String) : SyncState()
+    data class FileDeleted(val fileName: String) : SyncState()
+    data class SyncCompleted(val message: String) : SyncState()
+    data class Error(val message: String) : SyncState()
 } 

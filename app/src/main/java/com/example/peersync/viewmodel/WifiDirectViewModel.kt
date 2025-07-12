@@ -17,6 +17,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.peersync.data.WifiPeerDevice
 import com.example.peersync.data.SyncedFile
 import com.example.peersync.sync.SyncManager
+import com.example.peersync.sync.SyncState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,11 +43,37 @@ class WifiDirectViewModel : ViewModel() {
     private var fileToSave: SyncedFile? = null
 
     val syncedFiles: StateFlow<List<SyncedFile>> get() = syncManager?.syncedFiles ?: MutableStateFlow(emptyList())
+    val syncState: StateFlow<SyncState> get() = syncManager?.syncState ?: MutableStateFlow(SyncState.Idle)
 
     fun initializeWifiDirect(context: Context) {
         this.context = context
         localFolder = File(context.filesDir, "local_files").apply { mkdirs() }
         syncManager = SyncManager(context)
+        
+        // Observe sync state changes
+        viewModelScope.launch {
+            syncManager?.syncState?.collect { state ->
+                when (state) {
+                    is SyncState.Syncing -> {
+                        _uiState.update { it.copy(syncStatus = state.message) }
+                    }
+                    is SyncState.SyncCompleted -> {
+                        _uiState.update { it.copy(syncStatus = state.message) }
+                        kotlinx.coroutines.delay(3000)
+                        _uiState.update { it.copy(syncStatus = null) }
+                    }
+                    is SyncState.Error -> {
+                        _uiState.update { it.copy(syncStatus = state.message) }
+                        kotlinx.coroutines.delay(3000)
+                        _uiState.update { it.copy(syncStatus = null) }
+                    }
+                    else -> {
+                        // Keep current status for other states
+                    }
+                }
+            }
+        }
+        
         try {
             wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
             wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -292,8 +319,11 @@ class WifiDirectViewModel : ViewModel() {
         ) }
 
         if (info.groupFormed) {
-            syncManager?.onConnectionEstablished()
-            syncManager?.startSyncServer()
+            val peerAddress = info.groupOwnerAddress?.hostAddress
+            if (peerAddress != null) {
+                syncManager?.onConnectionEstablished(peerAddress)
+                syncManager?.startSyncServer()
+            }
         } else {
             syncManager?.stopSyncServer()
             syncManager?.onConnectionTerminated()
@@ -368,33 +398,20 @@ class WifiDirectViewModel : ViewModel() {
     fun syncFiles() {
         viewModelScope.launch {
             try {
-                val hostAddress = uiState.value.groupOwnerAddress ?: return@launch
-                
-                // Update transfer status
-                _uiState.update { it.copy(syncStatus = "Syncing files...") }
-                
-                var hasErrors = false
-                
-                // Sync all local files to peer
-                localFolder?.listFiles()?.forEach { file ->
-                    try {
-                        syncManager?.syncFile(file, hostAddress)
-                    } catch (e: Exception) {
-                        Log.e("WifiDirectViewModel", "Error syncing file ${file.name}", e)
-                        hasErrors = true
-                    }
+                if (!uiState.value.isConnected) {
+                    _uiState.update { it.copy(syncStatus = "Not connected to peer") }
+                    return@launch
                 }
                 
-                // Update UI based on sync result
-                _uiState.update { it.copy(
-                    syncStatus = if (hasErrors) "Sync completed with errors" else "Sync completed successfully"
-                ) }
-                
-                // Clear status after delay
-                viewModelScope.launch {
-                    kotlinx.coroutines.delay(3000)
-                    _uiState.update { it.copy(syncStatus = null) }
+                val localFiles = localFolder?.listFiles()?.toList() ?: emptyList()
+                if (localFiles.isEmpty()) {
+                    _uiState.update { it.copy(syncStatus = "No files to sync") }
+                    return@launch
                 }
+                
+                // Perform bidirectional sync
+                syncManager?.performBidirectionalSync(localFiles)
+                
             } catch (e: Exception) {
                 Log.e("WifiDirectViewModel", "Error during sync", e)
                 _uiState.update { it.copy(syncStatus = "Sync failed: ${e.message}") }
